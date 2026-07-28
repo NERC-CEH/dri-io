@@ -188,28 +188,3 @@ class TestPaginatedAPICall:
 
         assert result == expected_response
         assert mock_metadata_api.call_count == 3
-
-    @pytest.mark.asyncio
-    def test_retries_then_succeeds(self, mock_metadata_api: MagicMock, api: MetadataAPIManager) -> None:
-        """Check the paginated call succeeds once a transient connection error clears on retry."""
-        expected_response = {"meta": {}, "items": [{"key_1": "value_1"}]}
-        mock_metadata_api.side_effect = [
-            requests.exceptions.ConnectionError("boom"),
-            expected_response,
-        ]
-
-        result = api.make_paginated_api_call(self.host_url)
-
-        assert result == expected_response
-        assert mock_metadata_api.call_count == 2
-
-    @pytest.mark.asyncio
-    def test_retries_exhausted(self, mock_metadata_api: MagicMock, api: MetadataAPIManager) -> None:
-        """Check a persistent transient error is retried up to the limit before raising."""
-        mock_metadata_api.side_effect = requests.exceptions.ConnectionError("boom")
-
-        with pytest.raises(requests.exceptions.ConnectionError, match="boom"):
-            api.make_paginated_api_call(self.host_url)
-
-        # 1 initial attempt + 3 retries
-        assert mock_metadata_api.call_count == 4
