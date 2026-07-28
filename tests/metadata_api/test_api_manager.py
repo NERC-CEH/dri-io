@@ -2,6 +2,7 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 from httpx import HTTPError, HTTPStatusError, Request, Response, TimeoutException
 
 from driutils.metadata_api.api_manager import MetadataAPIManager
@@ -12,6 +13,12 @@ from driutils.testing_utils.mock_metadata_api import MockMetadataAPI
 def api() -> MetadataAPIManager:
     api = MetadataAPIManager(host="test_url.com")
     return api
+
+
+@pytest.fixture(autouse=True)
+def _no_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skip tenacity's real backoff sleeps so retry tests run instantly."""
+    monkeypatch.setattr("time.sleep", lambda *_: None)
 
 
 class TestMetadataApiManager:
@@ -89,6 +96,39 @@ class TestMetadataApiManager:
             with pytest.raises(json.JSONDecodeError):
                 api.make_api_call("test_url.com")
 
+            # Invalid JSON is not a transient failure, so it should not be retried.
+            assert mock_get.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_make_api_call_retries_then_succeeds(self, api: MetadataAPIManager) -> None:
+        """Test the call succeeds once a transient connection error clears on retry."""
+        with patch("requests.Session.get") as mock_get:
+            mock_request = Request(method="get", url="http://test_url.com")
+            mock_response = Response(200, json=self.mock_response_data, request=mock_request)
+
+            mock_get.side_effect = [
+                requests.exceptions.ConnectionError("boom"),
+                requests.exceptions.ConnectionError("boom"),
+                mock_response,
+            ]
+
+            result = api.make_api_call("http://test_url.com")
+
+            assert result == self.mock_response_data
+            assert mock_get.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_make_api_call_retries_exhausted(self, api: MetadataAPIManager) -> None:
+        """Test a persistent transient error is retried up to the limit before raising."""
+        with patch("requests.Session.get") as mock_get:
+            mock_get.side_effect = requests.exceptions.ConnectionError("boom")
+
+            with pytest.raises(requests.exceptions.ConnectionError, match="boom"):
+                api.make_api_call("http://test_url.com")
+
+            # 1 initial attempt + 3 retries
+            assert mock_get.call_count == 4
+
 
 @patch.object(MetadataAPIManager, "make_api_call")
 class TestPaginatedAPICall:
@@ -148,3 +188,28 @@ class TestPaginatedAPICall:
 
         assert result == expected_response
         assert mock_metadata_api.call_count == 3
+
+    @pytest.mark.asyncio
+    def test_retries_then_succeeds(self, mock_metadata_api: MagicMock, api: MetadataAPIManager) -> None:
+        """Check the paginated call succeeds once a transient connection error clears on retry."""
+        expected_response = {"meta": {}, "items": [{"key_1": "value_1"}]}
+        mock_metadata_api.side_effect = [
+            requests.exceptions.ConnectionError("boom"),
+            expected_response,
+        ]
+
+        result = api.make_paginated_api_call(self.host_url)
+
+        assert result == expected_response
+        assert mock_metadata_api.call_count == 2
+
+    @pytest.mark.asyncio
+    def test_retries_exhausted(self, mock_metadata_api: MagicMock, api: MetadataAPIManager) -> None:
+        """Check a persistent transient error is retried up to the limit before raising."""
+        mock_metadata_api.side_effect = requests.exceptions.ConnectionError("boom")
+
+        with pytest.raises(requests.exceptions.ConnectionError, match="boom"):
+            api.make_paginated_api_call(self.host_url)
+
+        # 1 initial attempt + 3 retries
+        assert mock_metadata_api.call_count == 4
