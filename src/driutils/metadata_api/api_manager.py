@@ -5,10 +5,13 @@ from typing import Any
 
 import requests
 from httpx import HTTPError
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 logger = logging.getLogger(__name__)
 
 PAGE_SIZE = 500
+
+_RETRYABLE_EXCEPTIONS = (HTTPError, requests.exceptions.RequestException)
 
 
 class MetadataAPIManager:
@@ -25,6 +28,12 @@ class MetadataAPIManager:
         self.host = host
         self.session = session or requests.Session()
 
+    @retry(
+        retry=retry_if_exception_type(_RETRYABLE_EXCEPTIONS),
+        wait=wait_exponential(multiplier=1, min=4, max=10),
+        stop=stop_after_attempt(4),
+        reraise=True,
+    )
     def make_api_call(self, url: str, params: list[tuple[str, str]] | dict[str, str] | None = None) -> dict[str, Any]:
         """Make a call to the metadata API.
 
